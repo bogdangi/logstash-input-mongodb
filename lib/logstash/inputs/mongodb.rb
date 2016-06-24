@@ -67,6 +67,9 @@ class LogStash::Inputs::MongoDB < LogStash::Inputs::Base
   # The default, `1`, means send a message every second.
   config :interval, :validate => :number, :default => 1
 
+  # The targed field on which it compare if changes happens
+  config :target_field, :validate => :string, :default => "_id"
+
   SINCE_TABLE = :since_table
 
   public
@@ -85,9 +88,7 @@ class LogStash::Inputs::MongoDB < LogStash::Inputs::Base
   def init_placeholder(sqlitedb, since_table, mongodb, mongo_collection_name)
     @logger.debug("init placeholder for #{since_table}_#{mongo_collection_name}")
     since = sqlitedb[SINCE_TABLE]
-    mongo_collection = mongodb.collection(mongo_collection_name)
-    first_entry = mongo_collection.find({}).sort('_id' => 1).limit(1).first
-    first_entry_id = first_entry['_id'].to_s
+    first_entry_id = (target_field == '_id' ? '000000000000000000000000' : Time.at(0).strftime('%FT%T.%LZ'))
     since.insert(:table => "#{since_table}_#{mongo_collection_name}", :place => first_entry_id)
     return first_entry_id
   end
@@ -135,7 +136,7 @@ class LogStash::Inputs::MongoDB < LogStash::Inputs::Base
     collection = mongodb.collection(mongo_collection_name)
     # Need to make this sort by date in object id then get the first of the series
     # db.events_20150320.find().limit(1).sort({ts:1})
-    return collection.find({:_id => {:$gte => last_id_object}}).limit(batch_size)
+    return collection.find({target_field => {:$gt => last_id_object}}).limit(batch_size)
   end
 
   public
@@ -225,7 +226,7 @@ class LogStash::Inputs::MongoDB < LogStash::Inputs::Base
           last_id = @collection_data[index][:last_id]
           #@logger.debug("last_id is #{last_id}", :index => index, :collection => collection_name)
           # get batch of events starting at the last_place if it is set
-          last_id_object = BSON::ObjectId(last_id)
+          last_id_object = (target_field == '_id' ? BSON::ObjectId(last_id) : Time.parse(last_id))
           cursor = get_cursor_for_collection(@mongodb, collection_name, last_id_object, batch_size)
           cursor.each do |doc|
             logdate = DateTime.parse(doc['_id'].generation_time.to_s)
@@ -330,7 +331,7 @@ class LogStash::Inputs::MongoDB < LogStash::Inputs::Base
             end
 
             queue << event
-            @collection_data[index][:last_id] = doc['_id'].to_s
+            @collection_data[index][:last_id] = (target_field == '_id' ? doc[target_field].to_s : doc[target_field].strftime('%FT%T.%LZ'))
           end
           # Store the last-seen doc in the database
           update_placeholder(@sqlitedb, since_table, collection_name, @collection_data[index][:last_id])
@@ -345,6 +346,10 @@ class LogStash::Inputs::MongoDB < LogStash::Inputs::Base
         sleep(sleeptime)
       rescue => e
         @logger.warn('MongoDB Input threw an exception, restarting', :exception => e)
+        puts '------------------------------------------'
+        puts e
+        puts e.message
+        puts '------------------------------------------'
       end
     end
   end # def run

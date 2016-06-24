@@ -92,4 +92,89 @@ describe LogStash::Inputs::MongoDB do
 
   end
 
+  it "should use specific filed to emit new event" do
+    mongo_uri = 'mongodb://localhost/logstash-input-mongodb_test'
+    sqlite_db_file = Stud::Temporary.file
+    placeholder_db_dir = File.dirname sqlite_db_file
+    placeholder_db_name = File.basename sqlite_db_file
+
+    collection = 'logstash-input-mongodb_test'
+
+    conf = <<-CONFIG
+      input {
+        mongodb {
+          uri => "#{mongo_uri}"
+          placeholder_db_dir => "#{placeholder_db_dir}"
+          placeholder_db_name => "#{placeholder_db_name}"
+          collection => "#{collection}"
+          target_field => "updated"
+        }
+      }
+    CONFIG
+
+    # Create the test DB and populate it with some data
+
+    db = Mongo::Client.new(mongo_uri).database
+    coll = db.collection(collection)
+    coll.drop
+    coll = db.collection(collection)
+    coll.insert_one({:message => "first message", :updated => Time.now})
+    coll.insert_one({:message => "second message", :updated => Time.now})
+
+    events = input(conf) do |pipeline, queue|
+      retries = 0
+      while retries < 20
+        # Add some new entries to the database
+
+        events = []
+        if queue.size >= 2
+          events = 2.times.collect { queue.pop }
+          break
+        end
+
+        sleep(0.1)
+        retries += 1
+      end
+
+      events
+    end
+
+    insist { events[0]["message"] } == "first message"
+    insist { events[1]["message"] } == "second message"
+
+    before = Time.now.strftime('%FT%T.%LZ')
+    sleep(0.1)
+
+    coll.find(:message => 'first message').
+        find_one_and_update('$set' => { :message => 'first message updated', :updated => Time.now })
+
+    coll.insert_one({:message => "first message", :updated => before })
+
+    coll.find(:message => 'second message').
+        find_one_and_update('$set' => { :message => 'second message updated', :updated => Time.now })
+
+
+    events = input(conf) do |pipeline, queue|
+
+      retries = 0
+      while retries < 20
+        # Add some new entries to the database
+
+        events = []
+        if queue.size >= 2
+          events = 2.times.collect { queue.pop }
+          break
+        end
+
+        sleep(0.1)
+        retries += 1
+      end
+
+      events
+    end
+
+    insist { events[0]["message"] } == "first message updated"
+    insist { events[1]["message"] } == "second message updated"
+  end
+
 end
